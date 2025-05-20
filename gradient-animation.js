@@ -7,37 +7,35 @@ function normalizeColor(hexCode) {
   return [(numHexCode >> 16 & 255) / 255, (numHexCode >> 8 & 255) / 255, (255 & numHexCode) / 255];
 }
 // This part was present in the original script. It creates an object e.g. { SCREEN: 0, LINEAR_LIGHT: 1 } but its result is not assigned or used.
-// It does not interfere with normalizeColor function above due to JavaScript's Automatic Semicolon Insertion (ASI) or explicit semicolons.
 ["SCREEN", "LINEAR_LIGHT"].reduce((acc, t, n) => Object.assign(acc, {
   [t]: n
 }), {});
 
-//Essential functionality of WebGl
+//Sets initial properties helper
+function eHelper(object, propertyName, val) {
+  return propertyName in object ? Object.defineProperty(object, propertyName, {
+    value: val, enumerable: true, configurable: true, writable: true
+  }) : object[propertyName] = val, object;
+}
+
 class MiniGl {
   constructor(canvas, width, height, debug = false) {
-    const _miniGl = this,
-          debug_output = typeof document !== 'undefined' && document.location && document.location.search && -1 !== document.location.search.toLowerCase().indexOf("debug=webgl");
+    const _miniGl = this; // _miniGl refers to the MiniGl instance ('this')
     _miniGl.canvas = canvas;
     _miniGl.gl = _miniGl.canvas.getContext("webgl", {
         antialias: true
     });
-    _miniGl.meshes = [];
-    const context = _miniGl.gl;
 
     if (!_miniGl.gl) {
-        console.error("WebGL not supported or context creation failed.");
-        return;
+        console.error("WebGL not supported or context creation failed. Gradient will not run.");
+        return; // Stop initialization if WebGL context failed
     }
 
-    if (width && height) this.setSize(width, height); // Check if width & height are provided
-    _miniGl.lastDebugMsg = 0; // Initialize lastDebugMsg
-    _miniGl.debug = debug && debug_output ? function(msg) { // Changed e to msg for clarity
-        const t = new Date();
-        if (t - _miniGl.lastDebugMsg > 1000) console.log("---");
-        console.log(t.toLocaleTimeString() + Array(Math.max(0, 32 - msg.length)).join(" ") + msg + ": ", ...Array.from(arguments).slice(1));
-        _miniGl.lastDebugMsg = t;
-    } : () => {};
+    _miniGl.meshes = [];
+    const context = _miniGl.gl; // Local alias for convenience for inner classes
 
+    // 1. Define helper "classes" like Uniform, Material on the instance via Object.defineProperties
+    //    These are used by commonUniforms and Material instances later.
     Object.defineProperties(_miniGl, {
         Material: {
             enumerable: false,
@@ -51,15 +49,18 @@ class MiniGl {
                         if (!context.getShaderParameter(shader, context.COMPILE_STATUS)) {
                             console.error("Shader compilation error:", context.getShaderInfoLog(shader), "Source:", source);
                         }
-                        _miniGl.debug("Material.compileShaderSource", { source });
+                        // _miniGl.debug is not defined yet if this constructor is called before _miniGl.debug is set.
+                        // This is okay if Material is only instantiated after MiniGl constructor completes.
+                        // However, commonUniforms instantiates Uniforms, which don't call debug.
+                        // Gradient materials are created later, when _miniGl.debug IS defined.
+                        if (_miniGl.debug) _miniGl.debug("Material.compileShaderSource", { source });
                         return shader;
                     }
-                    function getUniformVariableDeclarations(uniformsObj, type) { // Renamed uniforms to uniformsObj
+                    function getUniformVariableDeclarations(uniformsObj, type) {
                         return Object.entries(uniformsObj).map(([uniformName, uniformValue]) => uniformValue.getDeclaration(uniformName, type)).join("\n");
                     }
                     material.uniforms = uniforms;
                     material.uniformInstances = [];
-
                     const prefix = "\nprecision highp float;\n";
                     material.vertexSource = `${prefix}
 attribute vec4 position;
@@ -85,7 +86,7 @@ ${fragments}`;
                     material.attachUniforms(undefined, _miniGl.commonUniforms);
                     material.attachUniforms(undefined, material.uniforms);
                 }
-                attachUniforms(name, uniformValue) { // Renamed uniforms to uniformValue for clarity
+                attachUniforms(name, uniformValue) {
                     const material = this;
                     if (name === undefined) {
                         Object.entries(uniformValue).forEach(([n, uVal]) => material.attachUniforms(n, uVal));
@@ -94,9 +95,8 @@ ${fragments}`;
                     } else if (uniformValue.type === "struct") {
                         Object.entries(uniformValue.value).forEach(([structKey, structVal]) => material.attachUniforms(`${name}.${structKey}`, structVal));
                     } else {
-                        _miniGl.debug("Material.attachUniforms", { name, uniform: uniformValue });
+                        if (_miniGl.debug) _miniGl.debug("Material.attachUniforms", { name, uniform: uniformValue });
                         const location = context.getUniformLocation(material.program, name);
-                        // if (location === null) console.warn(`Uniform "${name}" not found in shader.`); // Optional warning
                         material.uniformInstances.push({
                             uniform: uniformValue,
                             location: location
@@ -106,29 +106,29 @@ ${fragments}`;
             }
         },
         Uniform: {
-            enumerable: false, 
+            enumerable: false,
             value: class {
-                constructor(config) { 
+                constructor(config) {
                     this.type = "float";
                     Object.assign(this, config);
                     this.typeFn = ({
                         float: "1f", int: "1i", vec2: "2fv", vec3: "3fv", vec4: "4fv", mat4: "Matrix4fv"
                     })[this.type] || "1f";
                 }
-                update(location) { 
-                    if (this.value !== undefined && location !== null && location !== -1) { 
+                update(location) {
+                    if (this.value !== undefined && location !== null && location !== -1) {
                         const args = [location];
                         if (this.typeFn.startsWith("Matrix")) {
-                            args.push(this.transpose || false); 
+                            args.push(this.transpose || false);
                         }
                         args.push(this.value);
                         context[`uniform${this.typeFn}`](...args);
                     }
                 }
-                getDeclaration(name, shaderType, length) { 
+                getDeclaration(name, shaderType, length) {
                     const uniform = this;
                     if (uniform.excludeFrom === shaderType) {
-                        return ""; 
+                        return "";
                     }
                     if (uniform.type === "array") {
                         if (!uniform.value || uniform.value.length === 0) return `// Uniform array ${name} is empty\n`;
@@ -138,7 +138,7 @@ ${fragments}`;
                         let structName = name.replace("u_", "");
                         structName = structName.charAt(0).toUpperCase() + structName.slice(1);
                         const members = Object.entries(uniform.value)
-                            .map(([memberName, memberUniform]) => `\t${memberUniform.getDeclaration(memberName, shaderType).replace(/^uniform\s+/, "")};`) 
+                            .map(([memberName, memberUniform]) => `\t${memberUniform.getDeclaration(memberName, shaderType).replace(/^uniform\s+/, "")};`)
                             .join("\n");
                         return `uniform struct ${structName} {\n${members}\n} ${name}${length > 0 ? `[${length}]` : ""}`;
                     }
@@ -147,9 +147,9 @@ ${fragments}`;
             }
         },
         PlaneGeometry: {
-            enumerable: false, 
+            enumerable: false,
             value: class {
-                constructor(width, height, segX, segY, orientation) { 
+                constructor(width, height, segX, segY, orientation) {
                     this.attributes = {
                         position: new _miniGl.Attribute({ target: context.ARRAY_BUFFER, size: 3 }),
                         uv: new _miniGl.Attribute({ target: context.ARRAY_BUFFER, size: 2 }),
@@ -159,93 +159,62 @@ ${fragments}`;
                     this.setTopology(segX, segY);
                     this.setSize(width, height, orientation);
                 }
-                setTopology(segX = 1, segY = 1) { 
-                    const geom = this; 
-                    geom.xSegCount = segX;
-                    geom.ySegCount = segY;
+                setTopology(segX = 1, segY = 1) {
+                    const geom = this;
+                    geom.xSegCount = segX; geom.ySegCount = segY;
                     geom.vertexCount = (geom.xSegCount + 1) * (geom.ySegCount + 1);
-                    geom.quadCount = geom.xSegCount * geom.ySegCount; 
-                    
+                    geom.quadCount = geom.xSegCount * geom.ySegCount;
                     geom.attributes.uv.values = new Float32Array(2 * geom.vertexCount);
                     geom.attributes.uvNorm.values = new Float32Array(2 * geom.vertexCount);
-                    geom.attributes.index.values = new Uint16Array(3 * geom.quadCount * 2); 
-
+                    geom.attributes.index.values = new Uint16Array(3 * geom.quadCount * 2);
                     for (let y = 0; y <= geom.ySegCount; y++) {
                         for (let x = 0; x <= geom.xSegCount; x++) {
                             const idx = y * (geom.xSegCount + 1) + x;
                             geom.attributes.uv.values[2 * idx] = x / geom.xSegCount;
-                            geom.attributes.uv.values[2 * idx + 1] = 1 - y / geom.ySegCount; 
+                            geom.attributes.uv.values[2 * idx + 1] = 1 - y / geom.ySegCount;
                             geom.attributes.uvNorm.values[2 * idx] = (x / geom.xSegCount) * 2 - 1;
-                            geom.attributes.uvNorm.values[2 * idx + 1] = (1 - y / geom.ySegCount) * 2 - 1; 
-
+                            geom.attributes.uvNorm.values[2 * idx + 1] = (1 - y / geom.ySegCount) * 2 - 1;
                             if (x < geom.xSegCount && y < geom.ySegCount) {
-                                const quadIdx = (y * geom.xSegCount + x) * 6; 
-                                const v1 = idx;
-                                const v2 = idx + 1;
-                                const v3 = idx + geom.xSegCount + 1;
-                                const v4 = idx + geom.xSegCount + 2;
-
-                                geom.attributes.index.values[quadIdx] = v1;
-                                geom.attributes.index.values[quadIdx + 1] = v3;
-                                geom.attributes.index.values[quadIdx + 2] = v2;
-                                geom.attributes.index.values[quadIdx + 3] = v2;
-                                geom.attributes.index.values[quadIdx + 4] = v3;
-                                geom.attributes.index.values[quadIdx + 5] = v4;
+                                const quadIdx = (y * geom.xSegCount + x) * 6;
+                                const v1 = idx, v2 = idx + 1, v3 = idx + geom.xSegCount + 1, v4 = idx + geom.xSegCount + 2;
+                                geom.attributes.index.values[quadIdx] = v1; geom.attributes.index.values[quadIdx + 1] = v3; geom.attributes.index.values[quadIdx + 2] = v2;
+                                geom.attributes.index.values[quadIdx + 3] = v2; geom.attributes.index.values[quadIdx + 4] = v3; geom.attributes.index.values[quadIdx + 5] = v4;
                             }
                         }
                     }
-                    geom.attributes.uv.update();
-                    geom.attributes.uvNorm.update();
-                    geom.attributes.index.update();
-                    _miniGl.debug("Geometry.setTopology", { uv: geom.attributes.uv, uvNorm: geom.attributes.uvNorm, index: geom.attributes.index });
+                    geom.attributes.uv.update(); geom.attributes.uvNorm.update(); geom.attributes.index.update();
+                    if (_miniGl.debug) _miniGl.debug("Geometry.setTopology", { uv: geom.attributes.uv, uvNorm: geom.attributes.uvNorm, index: geom.attributes.index });
                 }
                 setSize(width = 1, height = 1, orientation = "xz") {
-                    const geom = this;
-                    geom.width = width;
-                    geom.height = height;
-                    geom.orientation = orientation;
+                    const geom = this; geom.width = width; geom.height = height; geom.orientation = orientation;
                     if (!geom.attributes.position.values || geom.attributes.position.values.length !== 3 * geom.vertexCount) {
                         geom.attributes.position.values = new Float32Array(3 * geom.vertexCount);
                     }
                     const halfWidth = width / 2, halfHeight = height / 2;
                     const segWidth = width / geom.xSegCount, segHeight = height / geom.ySegCount;
-
                     for (let yIdx = 0; yIdx <= geom.ySegCount; yIdx++) {
                         const yPos = -halfHeight + yIdx * segHeight;
                         for (let xIdx = 0; xIdx <= geom.xSegCount; xIdx++) {
-                            const xPos = -halfWidth + xIdx * segWidth;
-                            const idx = yIdx * (geom.xSegCount + 1) + xIdx;
-                            
-                            geom.attributes.position.values[3 * idx + 0] = 0; 
-                            geom.attributes.position.values[3 * idx + 1] = 0; 
-                            geom.attributes.position.values[3 * idx + 2] = 0; 
-
+                            const xPos = -halfWidth + xIdx * segWidth; const idx = yIdx * (geom.xSegCount + 1) + xIdx;
+                            geom.attributes.position.values[3 * idx + 0] = 0; geom.attributes.position.values[3 * idx + 1] = 0; geom.attributes.position.values[3 * idx + 2] = 0;
                             geom.attributes.position.values[3 * idx + "xyz".indexOf(orientation[0])] = xPos;
-                            geom.attributes.position.values[3 * idx + "xyz".indexOf(orientation[1])] = -yPos; 
+                            geom.attributes.position.values[3 * idx + "xyz".indexOf(orientation[1])] = -yPos;
                         }
                     }
                     geom.attributes.position.update();
-                    _miniGl.debug("Geometry.setSize", { position: geom.attributes.position });
+                    if (_miniGl.debug) _miniGl.debug("Geometry.setSize", { position: geom.attributes.position });
                 }
             }
         },
         Mesh: {
-            enumerable: false, 
+            enumerable: false,
             value: class {
                 constructor(geometry, material) {
-                    const mesh = this;
-                    mesh.geometry = geometry;
-                    mesh.material = material;
-                    mesh.wireframe = false;
-                    mesh.attributeInstances = [];
-                    Object.entries(mesh.geometry.attributes).forEach(([attrName, attribute]) => { 
-                        mesh.attributeInstances.push({
-                            attribute,
-                            location: attribute.attach(attrName, mesh.material.program)
-                        });
+                    const mesh = this; mesh.geometry = geometry; mesh.material = material; mesh.wireframe = false; mesh.attributeInstances = [];
+                    Object.entries(mesh.geometry.attributes).forEach(([attrName, attribute]) => {
+                        mesh.attributeInstances.push({ attribute, location: attribute.attach(attrName, mesh.material.program) });
                     });
-                    _miniGl.meshes.push(mesh);
-                    _miniGl.debug("Mesh.constructor", { mesh });
+                    _miniGl.meshes.push(mesh); if (_miniGl.debug) _miniGl.debug("Mesh.constructor", { mesh });
                 }
                 draw() {
                     if (!this.material || !this.material.program || !context) return;
@@ -256,20 +225,15 @@ ${fragments}`;
                         context.drawElements(this.wireframe ? context.LINES : context.TRIANGLES, this.geometry.attributes.index.values.length, context.UNSIGNED_SHORT, 0);
                     }
                 }
-                remove() {
-                    _miniGl.meshes = _miniGl.meshes.filter(m => m !== this); 
-                }
+                remove() { _miniGl.meshes = _miniGl.meshes.filter(m => m !== this); }
             }
         },
         Attribute: {
-            enumerable: false, 
+            enumerable: false,
             value: class {
-                constructor(config) { 
-                    this.type = context.FLOAT;
-                    this.normalized = false;
-                    this.buffer = context.createBuffer();
-                    Object.assign(this, config);
-                    this.update();
+                constructor(config) {
+                    this.type = context.FLOAT; this.normalized = false; this.buffer = context.createBuffer();
+                    Object.assign(this, config); this.update();
                 }
                 update() {
                     if (this.values !== undefined) {
@@ -277,19 +241,17 @@ ${fragments}`;
                         context.bufferData(this.target, this.values, context.STATIC_DRAW);
                     }
                 }
-                attach(attrName, program) { 
+                attach(attrName, program) {
                     const location = context.getAttribLocation(program, attrName);
-                    if (location === -1) {
-                        return location;
-                    }
-                    context.bindBuffer(this.target, this.buffer); 
+                    if (location === -1) return location;
+                    context.bindBuffer(this.target, this.buffer);
                     if (this.target === context.ARRAY_BUFFER) {
                         context.enableVertexAttribArray(location);
                         context.vertexAttribPointer(location, this.size, this.type, this.normalized, 0, 0);
                     }
                     return location;
                 }
-                use(location) { 
+                use(location) {
                     if (!context) return;
                     context.bindBuffer(this.target, this.buffer);
                     if (this.target === context.ARRAY_BUFFER && location !== -1) {
@@ -299,44 +261,64 @@ ${fragments}`;
                 }
             }
         }
-    });
-    const identityMatrix = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]; 
+    }); // End of Object.defineProperties
+
+    // 2. Initialize the debug function
+    const debug_output = typeof document !== 'undefined' && document.location && document.location.search && -1 !== document.location.search.toLowerCase().indexOf("debug=webgl");
+    _miniGl.lastDebugMsg = 0;
+    _miniGl.debug = debug && debug_output ? function(msg) {
+        const t = new Date();
+        if (t - _miniGl.lastDebugMsg > 1000) console.log("---");
+        console.log(t.toLocaleTimeString() + Array(Math.max(0, 32 - msg.length)).join(" ") + msg + ": ", ...Array.from(arguments).slice(1));
+        _miniGl.lastDebugMsg = t;
+    } : () => {}; // Empty function if not debugging
+
+    // 3. Initialize commonUniforms (which uses _miniGl.Uniform, now defined)
+    const identityMatrix = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
     _miniGl.commonUniforms = {
         projectionMatrix: new _miniGl.Uniform({ type: "mat4", value: [...identityMatrix] }),
         modelViewMatrix: new _miniGl.Uniform({ type: "mat4", value: [...identityMatrix] }),
         resolution: new _miniGl.Uniform({ type: "vec2", value: [1, 1] }),
         aspectRatio: new _miniGl.Uniform({ type: "float", value: 1 })
     };
-  } 
 
-  setSize(width = 640, height = 480) { 
+    // 4. Call setSize if width and height are provided
+    //    This now happens after _miniGl.debug and _miniGl.commonUniforms are initialized.
+    if (width !== undefined && height !== undefined && width !== null && height !== null) {
+      this.setSize(width, height);
+    } else if (this.canvas && this.canvas.width && this.canvas.height) {
+      this.setSize(this.canvas.width, this.canvas.height);
+    } else {
+      this.setSize(640, 480); // Default size if no other dimensions are available
+      _miniGl.debug("MiniGL.constructor: No dimensions provided or canvas has no dimensions, using default size.");
+    }
+  } // End of MiniGl constructor
+
+  setSize(width = 640, height = 480) {
     if (!this.gl) return;
     this.width = width; this.height = height;
     this.canvas.width = width; this.canvas.height = height;
     this.gl.viewport(0, 0, width, height);
-    if (this.commonUniforms && this.commonUniforms.resolution) { // Check existence
+    if (this.commonUniforms && this.commonUniforms.resolution) {
         this.commonUniforms.resolution.value = [width, height];
         this.commonUniforms.aspectRatio.value = width / height;
     }
-    this.debug("MiniGL.setSize", { width, height });
+    this.debug("MiniGL.setSize", { width, height }); // This should now work
   }
 
   setOrthographicCamera(left = -1, right = 1, bottom = -1, top = 1, near = -2000, far = 2000) {
-    if (!this.commonUniforms || !this.commonUniforms.projectionMatrix) return; // Check existence
-
-    if (this.width && this.height) { // Prioritize this if available for fullscreen 2D
+    if (!this.commonUniforms || !this.commonUniforms.projectionMatrix) return;
+    if (this.width && this.height) {
         this.commonUniforms.projectionMatrix.value = [
             2 / this.width, 0, 0, 0,
-            0, -2 / this.height, 0, 0, 
+            0, -2 / this.height, 0, 0,
             0, 0, 2 / (near - far), 0,
             -1, 1, (near + far) / (near - far), 1
         ];
-    } else { // Generic ortho if width/height not set on MiniGL instance
+    } else {
         const lr = 1 / (left - right), bt = 1 / (bottom - top), nf = 1 / (near - far);
         this.commonUniforms.projectionMatrix.value = [
-            -2 * lr, 0, 0, 0,
-            0, -2 * bt, 0, 0,
-            0, 0, 2 * nf, 0,
+            -2 * lr, 0, 0, 0, 0, -2 * bt, 0, 0, 0, 0, 2 * nf, 0,
             (left + right) * lr, (top + bottom) * bt, (far + near) * nf, 1
         ];
     }
@@ -347,18 +329,13 @@ ${fragments}`;
     if (!this.gl) return;
     this.gl.clearColor(0, 0, 0, 0);
     this.gl.clearDepth(1);
-    this.meshes.forEach(mesh => mesh.draw()); 
+    this.meshes.forEach(mesh => mesh.draw());
   }
-} 
+} // End of MiniGl Class
 
-function eHelper(object, propertyName, val) { 
-  return propertyName in object ? Object.defineProperty(object, propertyName, {
-    value: val, enumerable: true, configurable: true, writable: true
-  }) : object[propertyName] = val, object;
-}
 
 class Gradient {
-  constructor() { 
+  constructor() {
     eHelper(this, "el", void 0);
     eHelper(this, "cssVarRetries", 0);
     eHelper(this, "maxCssVarRetries", 200);
@@ -367,31 +344,31 @@ class Gradient {
     eHelper(this, "isScrolling", false);
     eHelper(this, "scrollingTimeout", void 0);
     eHelper(this, "scrollingRefreshDelay", 200);
-    eHelper(this, "isIntersecting", false); 
+    eHelper(this, "isIntersecting", false);
     eHelper(this, "shaderFiles", void 0);
     eHelper(this, "vertexShader", void 0);
     eHelper(this, "sectionColors", void 0);
     eHelper(this, "computedCanvasStyle", void 0);
     eHelper(this, "conf", void 0);
     eHelper(this, "uniforms", void 0);
-    eHelper(this, "t", 1253106); 
-    eHelper(this, "last", 0); 
-    eHelper(this, "width", typeof window !== 'undefined' ? window.innerWidth : 1024); 
-    eHelper(this, "minWidth", 1111); 
-    eHelper(this, "height", 600); 
+    eHelper(this, "t", 1253106);
+    eHelper(this, "last", 0);
+    eHelper(this, "width", typeof window !== 'undefined' ? window.innerWidth : 1024);
+    eHelper(this, "minWidth", 1111);
+    eHelper(this, "height", 600);
     eHelper(this, "xSegCount", void 0);
     eHelper(this, "ySegCount", void 0);
     eHelper(this, "mesh", void 0);
     eHelper(this, "material", void 0);
     eHelper(this, "geometry", void 0);
     eHelper(this, "minigl", void 0);
-    eHelper(this, "scrollObserver", void 0); 
-    eHelper(this, "amp", 320); 
+    eHelper(this, "scrollObserver", void 0);
+    eHelper(this, "amp", 320);
     eHelper(this, "seed", 5);
     eHelper(this, "freqX", 14e-5);
     eHelper(this, "freqY", 29e-5);
     eHelper(this, "freqDelta", 1e-5);
-    eHelper(this, "activeColors", [1, 1, 1, 1]); 
+    eHelper(this, "activeColors", [1, 1, 1, 1]);
     eHelper(this, "isMetaKey", false);
     eHelper(this, "isGradientLegendVisible", false);
     eHelper(this, "isMouseDown", false);
@@ -399,147 +376,53 @@ class Gradient {
     eHelper(this, "boundMouseDown", null);
     eHelper(this, "boundMouseUp", null);
 
+    this.animate = this.animate.bind(this); // Bind animate once
+    this.resize = this.resize.bind(this); // Bind resize once
+    this.handleScroll = this.handleScroll.bind(this);
+    this.handleScrollEnd = this.handleScrollEnd.bind(this);
+    this.handleMouseDown = this.handleMouseDown.bind(this);
+    this.handleMouseUp = this.handleMouseUp.bind(this);
+    this.waitForCssVars = this.waitForCssVars.bind(this);
 
-    eHelper(this, "handleScroll", () => {
-        clearTimeout(this.scrollingTimeout);
-        this.scrollingTimeout = setTimeout(this.handleScrollEnd.bind(this), this.scrollingRefreshDelay);
-        if (this.isGradientLegendVisible) this.hideGradientLegend();
-        if (this.conf && this.conf.playing) {
-            this.isScrolling = true; this.pause();
-        }
-    });
-    eHelper(this, "handleScrollEnd", () => {
-        this.isScrolling = false;
-        if (this.isIntersecting && this.conf && !this.conf.playing) this.play(); 
-    });
-    eHelper(this, "resize", () => {
-        this.width = typeof window !== 'undefined' ? window.innerWidth : 1024; 
-        if (this.minigl) {
-            this.minigl.setSize(this.width, this.height);
-            this.minigl.setOrthographicCamera(); 
-        }
-        if (this.conf && this.mesh && this.mesh.geometry && this.mesh.material && this.mesh.material.uniforms.u_shadow_power) {
-            this.xSegCount = Math.ceil(this.width * this.conf.density[0]);
-            this.ySegCount = Math.ceil(this.height * this.conf.density[1]);
-            this.mesh.geometry.setTopology(this.xSegCount, this.ySegCount);
-            this.mesh.geometry.setSize(this.width, this.height); 
-            this.mesh.material.uniforms.u_shadow_power.value = this.width < 600 ? 5 : 6;
-        }
-    });
-    eHelper(this, "handleMouseDown", event => { 
-        if (this.isGradientLegendVisible) {
-            this.isMetaKey = event.metaKey;
-            this.isMouseDown = true;
-            if (this.conf && !this.conf.playing) requestAnimationFrame(this.animate.bind(this));
-        }
-    });
-    eHelper(this, "handleMouseUp", () => {
-        this.isMouseDown = false;
-    });
-    eHelper(this, "animate", timestamp => { 
-        if (this.shouldSkipFrame(timestamp) && !this.isMouseDown) { 
-        } else {
-            if (this.last === 0) this.last = timestamp; 
-            const delta = timestamp - this.last;
-            this.t += Math.min(delta, 1000 / 15); 
-            this.last = timestamp;
 
-            if (this.isMouseDown) {
-                let clickEffectTime = 160;
-                if (this.isMetaKey) clickEffectTime = -160;
-                this.t += clickEffectTime;
-            }
-            if (this.mesh && this.mesh.material && this.mesh.material.uniforms.u_time) {
-                 this.mesh.material.uniforms.u_time.value = this.t;
-            }
-            if (this.minigl) this.minigl.render();
-        }
-        const shouldContinueAnimation = (this.isIntersecting && this.conf && this.conf.playing) || this.isMouseDown;
-        if (shouldContinueAnimation) {
-          requestAnimationFrame(this.animate.bind(this));
-        }
-    });
-    eHelper(this, "addIsLoadedClass", () => {
-        if (this.isLoadedClass || !this.el) return; 
-        this.isLoadedClass = true;
-        this.el.classList.add("isLoaded");
-        if (this.el.parentElement) {
-            setTimeout(() => {
-                if (this.el.parentElement) this.el.parentElement.classList.add("isLoaded");
-            }, 3000);
-        }
-    });
-    eHelper(this, "pause", () => {
-        if (this.conf) this.conf.playing = false;
-    });
-    eHelper(this, "play", () => {
-        if (this.conf) {
-            this.conf.playing = true;
-            this.last = 0; 
-            requestAnimationFrame(this.animate.bind(this));
-        }
-    });
-    eHelper(this,"initGradient", (selector) => {
-      if (typeof document === 'undefined') {
-          console.error("Document not found. Cannot initialize gradient.");
-          return this;
-      }
-      this.el = document.querySelector(selector);
-      if (!this.el) {
-        console.error(`Gradient target element "${selector}" not found.`);
-        return this;
-      }
-      if (!this.scrollObserver) {
-          this.isIntersecting = true;
-      }
-      this.connect(); 
-      return this;
-    });
-  } 
+  } // End of Gradient constructor
 
-  connect() { 
+  connect() {
     this.shaderFiles = {
         vertex: `varying vec3 v_color;
 void main() {
   float time = u_time * u_global.noiseSpeed;
   vec2 noiseCoord = resolution * uvNorm * u_global.noiseFreq;
-
   float tilt = resolution.y / 2.0 * uvNorm.y;
   float incline = resolution.x * uvNorm.x / 2.0 * u_vertDeform.incline;
   float offset = resolution.x / 2.0 * u_vertDeform.incline * mix(u_vertDeform.offsetBottom, u_vertDeform.offsetTop, uv.y);
-
   float noise = snoise(vec3(
     noiseCoord.x * u_vertDeform.noiseFreq.x + time * u_vertDeform.noiseFlow,
     noiseCoord.y * u_vertDeform.noiseFreq.y,
     time * u_vertDeform.noiseSpeed + u_vertDeform.noiseSeed
   )) * u_vertDeform.noiseAmp;
-
   noise *= 1.0 - pow(abs(uvNorm.y), 2.0);
   noise = max(0.0, noise);
-
   vec3 pos = vec3(
     position.x,
     position.y + tilt + incline + noise - offset,
     position.z
   );
-
   if (u_active_colors[0] == 1.) {
     v_color = u_baseColor;
   }
-
   for (int i = 0; i < u_waveLayers_length; i++) {
-    if (u_active_colors[i + 1] == 1.) { 
+    if (u_active_colors[i + 1] == 1.) {
       WaveLayers layer = u_waveLayers[i];
       float noiseVal = smoothstep(
-        layer.noiseFloor,
-        layer.noiseCeil,
+        layer.noiseFloor, layer.noiseCeil,
         snoise(vec3(
           noiseCoord.x * layer.noiseFreq.x + time * layer.noiseFlow,
           noiseCoord.y * layer.noiseFreq.y,
           time * layer.noiseSpeed + layer.noiseSeed
-        )) / 2.0 + 0.5 
+        )) / 2.0 + 0.5
       );
-      v_color = blendNormal(v_color, layer.color, pow(noiseVal, 4.0)); 
+      v_color = blendNormal(v_color, layer.color, pow(noiseVal, 4.0));
     }
   }
   gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
@@ -551,28 +434,28 @@ void main() {
   vec3 color = v_color;
   if (u_darken_top == 1.0) {
     vec2 st = gl_FragCoord.xy / resolution.xy;
-    color -= pow(st.y, u_shadow_power) * 0.4; 
+    color -= pow(st.y, u_shadow_power) * 0.4;
   }
   gl_FragColor = vec4(color, 1.0);
 }`
     };
     this.conf = {
-        presetName: "", 
+        presetName: "",
         wireframe: false,
-        density: [.06, .16], 
+        density: [.06, .16],
         zoom: 1,
         rotation: 0,
         playing: true
     };
-    
+
     if (this.el) {
-        this.minigl = new MiniGl(this.el, this.width, this.height, true); 
+        this.minigl = new MiniGl(this.el, this.width, this.height, true);
         if (!this.minigl || !this.minigl.gl) {
              console.error("MiniGL initialization failed. Gradient cannot connect.");
              return;
         }
         requestAnimationFrame(() => {
-            if (this.el && typeof getComputedStyle === 'function') { 
+            if (this.el && typeof getComputedStyle === 'function') {
                 this.computedCanvasStyle = getComputedStyle(this.el);
                 this.waitForCssVars();
             } else if (!this.el) {
@@ -587,13 +470,13 @@ void main() {
 
   disconnect() {
     if (typeof window !== 'undefined') {
-        window.removeEventListener("scroll", this.handleScroll.bind(this)); // Ensure bound version is removed if added bound
+        window.removeEventListener("scroll", this.handleScroll);
         if (this.boundMouseDown) window.removeEventListener("mousedown", this.boundMouseDown);
         if (this.boundMouseUp) window.removeEventListener("mouseup", this.boundMouseUp);
         if (this.boundResize) window.removeEventListener("resize", this.boundResize);
     }
     this.pause();
-    if (this.mesh) this.mesh.remove(); 
+    if (this.mesh) this.mesh.remove();
   }
 
   initMaterial() {
@@ -601,7 +484,7 @@ void main() {
         console.error("MiniGL or MiniGL.Uniform not initialized, cannot create material.");
         return null;
     }
-    const defaultColor = [1, 0, 1]; 
+    const defaultColor = [1, 0, 1];
     this.uniforms = {
         u_time: new this.minigl.Uniform({ value: 0 }),
         u_shadow_power: new this.minigl.Uniform({ value: 5 }),
@@ -626,8 +509,8 @@ void main() {
     };
 
     if (this.sectionColors && this.sectionColors.length > 0) {
-      for (let i = 1; i < this.sectionColors.length; i++) { // Start from 1 for wave layers
-          if(this.sectionColors[i]){ // Check if color exists
+      for (let i = 1; i < this.sectionColors.length; i++) {
+          if(this.sectionColors[i]){
             this.uniforms.u_waveLayers.value.push(new this.minigl.Uniform({ type: "struct", value: {
                 color: new this.minigl.Uniform({ value: this.sectionColors[i] || defaultColor, type: "vec3" }),
                 noiseFreq: new this.minigl.Uniform({ value: [2 + i / this.sectionColors.length, 3 + i / this.sectionColors.length], type: "vec2" }),
@@ -648,18 +531,18 @@ void main() {
     if (!this.minigl) { console.error("MiniGL not initialized for mesh."); return; }
     this.material = this.initMaterial();
     if (!this.material) { console.error("Material not initialized for mesh."); return; }
-    this.geometry = new this.minigl.PlaneGeometry(this.width, this.height); 
+    this.geometry = new this.minigl.PlaneGeometry(this.width, this.height, this.xSegCount || 1, this.ySegCount || 1); // Pass segment counts
     this.mesh = new this.minigl.Mesh(this.geometry, this.material);
     if (this.conf && this.mesh) this.mesh.wireframe = this.conf.wireframe;
   }
 
-  shouldSkipFrame(timestamp) { 
+  shouldSkipFrame(timestamp) {
     if (typeof document !== 'undefined' && document.hidden) return true;
     if (!this.conf || !this.conf.playing) return true;
-    return false; 
+    return false;
   }
 
-  updateFrequency(deltaFreq) { 
+  updateFrequency(deltaFreq) {
     this.freqX += deltaFreq;
     this.freqY += deltaFreq;
     if (this.uniforms && this.uniforms.u_global && this.uniforms.u_global.value.noiseFreq) {
@@ -669,7 +552,7 @@ void main() {
 
   toggleColor(index) {
     if (this.activeColors[index] !== undefined) {
-      this.activeColors[index] = 1 - this.activeColors[index]; 
+      this.activeColors[index] = 1 - this.activeColors[index];
     }
     if (this.uniforms && this.uniforms.u_active_colors) {
         this.uniforms.u_active_colors.value = [...this.activeColors];
@@ -695,41 +578,39 @@ void main() {
         console.error("Gradient prerequisites not met for init (el, minigl, or gl context).");
         return;
     }
-    this.initGradientColors(); 
-    this.initMesh();
-    this.resize(); 
-    
+    this.initGradientColors();
+    this.initMesh(); // xSegCount and ySegCount are used here, ensure they are set if needed by PlaneGeometry
+    this.resize();
+
     if (typeof window !== 'undefined') {
         if (this.boundResize) window.removeEventListener("resize", this.boundResize);
-        this.boundResize = this.resize.bind(this); 
+        this.boundResize = this.resize;
         window.addEventListener("resize", this.boundResize);
-        
-        if (this.el && this.isGradientLegendVisible !== undefined) { 
+
+        if (this.el && this.isGradientLegendVisible !== undefined) {
             if (this.boundMouseDown) window.removeEventListener("mousedown", this.boundMouseDown);
             if (this.boundMouseUp) window.removeEventListener("mouseup", this.boundMouseUp);
-            this.boundMouseDown = this.handleMouseDown.bind(this);
-            this.boundMouseUp = this.handleMouseUp.bind(this);
+            this.boundMouseDown = this.handleMouseDown;
+            this.boundMouseUp = this.handleMouseUp;
             window.addEventListener("mousedown", this.boundMouseDown);
             window.addEventListener("mouseup", this.boundMouseUp);
         }
     }
 
-
     if (this.conf && this.conf.playing) {
         this.play();
     }
-    this.addIsLoadedClass(); 
+    this.addIsLoadedClass();
   }
 
   waitForCssVars() {
     if (typeof getComputedStyle !== 'function' || !this.el) {
-        // Fallback if getComputedStyle is not available or el is missing
         console.warn("getComputedStyle not available or element missing. Using fallback colors for gradient.");
         this.sectionColors = [0x73b3f2, 0x72aeee, 0x3c8fe5, 0x2675c9].map(normalizeColor);
         this.init();
         return;
     }
-    this.computedCanvasStyle = getComputedStyle(this.el); // Ensure it's fresh
+    this.computedCanvasStyle = getComputedStyle(this.el);
     const color1 = this.computedCanvasStyle ? this.computedCanvasStyle.getPropertyValue("--gradient-color-1").trim() : "";
     if (color1 && color1.startsWith("#")) {
         this.init();
@@ -738,22 +619,22 @@ void main() {
         if (this.cssVarRetries > this.maxCssVarRetries) {
             console.warn("CSS gradient color variables not found. Using fallback colors.");
             this.sectionColors = [
-                normalizeColor(0x73b3f2), 
+                normalizeColor(0x73b3f2),
                 normalizeColor(0x72aeee),
                 normalizeColor(0x3c8fe5),
                 normalizeColor(0x2675c9)
             ];
-            this.init(); 
+            this.init();
             return;
         }
-        requestAnimationFrame(this.waitForCssVars.bind(this));
+        requestAnimationFrame(this.waitForCssVars);
     }
   }
 
   initGradientColors() {
     const defaultFallbackColors = [0x73b3f2, 0x72aeee, 0x3c8fe5, 0x2675c9].map(hexNum => normalizeColor(hexNum));
     if (!this.computedCanvasStyle && typeof getComputedStyle === 'function' && this.el) {
-        this.computedCanvasStyle = getComputedStyle(this.el); // Attempt to get it if missing
+        this.computedCanvasStyle = getComputedStyle(this.el);
     }
 
     if (!this.computedCanvasStyle) {
@@ -765,28 +646,109 @@ void main() {
     this.sectionColors = colorVarNames.map(varName => {
         let hex = this.computedCanvasStyle.getPropertyValue(varName).trim();
         if (hex && hex.startsWith("#")) {
-            if (hex.length === 4) { 
+            if (hex.length === 4) {
                 hex = `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`;
             }
             return normalizeColor(parseInt(hex.substring(1), 16));
         }
-        return null; 
-    }).filter(color => color !== null); 
+        return null;
+    }).filter(color => color !== null);
 
-    if (!this.sectionColors || this.sectionColors.length < 4) { // Check for at least 4 colors, or adjust as needed
+    if (!this.sectionColors || this.sectionColors.length < 4) {
         console.warn("Failed to parse sufficient CSS variables for gradient colors. Using hardcoded defaults or fewer layers.");
         if (!this.sectionColors || this.sectionColors.length === 0) {
             this.sectionColors = defaultFallbackColors;
         }
-        // Potentially pad with defaults if some are missing but not all
-        while(this.sectionColors.length < 4 && this.sectionColors.length > 0) {
+        while(this.sectionColors.length < 4 && this.sectionColors.length > 0) { // Ensure 4 colors for the shader expecting them
             this.sectionColors.push(defaultFallbackColors[this.sectionColors.length % defaultFallbackColors.length]);
         }
     }
   }
-} 
 
-// Expose Gradient class to global scope for external instantiation
+  handleScroll() {
+      clearTimeout(this.scrollingTimeout);
+      this.scrollingTimeout = setTimeout(this.handleScrollEnd, this.scrollingRefreshDelay);
+      if (this.isGradientLegendVisible) this.hideGradientLegend();
+      if (this.conf && this.conf.playing) {
+          this.isScrolling = true; this.pause();
+      }
+  }
+  handleScrollEnd() {
+      this.isScrolling = false;
+      if (this.isIntersecting && this.conf && !this.conf.playing) this.play();
+  }
+  handleMouseDown(event) {
+      if (this.isGradientLegendVisible) {
+          this.isMetaKey = event.metaKey;
+          this.isMouseDown = true;
+          if (this.conf && !this.conf.playing) requestAnimationFrame(this.animate);
+      }
+  }
+  handleMouseUp() {
+      this.isMouseDown = false;
+  }
+  animate(timestamp) {
+      if (this.shouldSkipFrame(timestamp) && !this.isMouseDown) {
+          // Skip frame
+      } else {
+          if (this.last === 0) this.last = timestamp;
+          const delta = timestamp - this.last;
+          this.t += Math.min(delta, 1000 / 15);
+          this.last = timestamp;
+
+          if (this.isMouseDown) {
+              let clickEffectTime = 160;
+              if (this.isMetaKey) clickEffectTime = -160;
+              this.t += clickEffectTime;
+          }
+          if (this.mesh && this.mesh.material && this.mesh.material.uniforms.u_time) {
+               this.mesh.material.uniforms.u_time.value = this.t;
+          }
+          if (this.minigl) this.minigl.render();
+      }
+      const shouldContinueAnimation = (this.isIntersecting && this.conf && this.conf.playing) || this.isMouseDown;
+      if (shouldContinueAnimation) {
+        requestAnimationFrame(this.animate);
+      }
+  }
+  addIsLoadedClass() {
+      if (this.isLoadedClass || !this.el) return;
+      this.isLoadedClass = true;
+      this.el.classList.add("isLoaded");
+      if (this.el.parentElement) {
+          setTimeout(() => {
+              if (this.el.parentElement) this.el.parentElement.classList.add("isLoaded");
+          }, 3000);
+      }
+  }
+  pause() {
+      if (this.conf) this.conf.playing = false;
+  }
+  play() {
+      if (this.conf) {
+          this.conf.playing = true;
+          this.last = 0;
+          requestAnimationFrame(this.animate);
+      }
+  }
+  initGradient(selector) {
+    if (typeof document === 'undefined') {
+        console.error("Document not found. Cannot initialize gradient.");
+        return this;
+    }
+    this.el = document.querySelector(selector);
+    if (!this.el) {
+      console.error(`Gradient target element "${selector}" not found.`);
+      return this;
+    }
+    if (!this.scrollObserver) { // If scroll observer is not used, assume intersecting
+        this.isIntersecting = true;
+    }
+    this.connect();
+    return this;
+  }
+} // End of Gradient Class
+
 if (typeof window !== 'undefined') {
   window.Gradient = Gradient;
 }
